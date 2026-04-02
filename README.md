@@ -823,6 +823,465 @@ docker system prune -f
 
 ---
 
+## 🐋 Step 15 — Build Docker Image & Push to DockerHub
+
+### 15.1 — Login to DockerHub
+```bash
+docker login
+# Enter your DockerHub username: atique123
+# Enter your DockerHub password
+```
+
+### 15.2 — Build the Docker Image
+```bash
+# Build from the project root (where docker/django/Dockerfile is located)
+docker build -t atique123/django-app:latest -f docker/django/Dockerfile .
+
+# Build with a specific version tag
+docker build -t atique123/django-app:v1.0.0 -f docker/django/Dockerfile .
+```
+
+### 15.3 — Test the Image Locally
+```bash
+docker run --rm -p 8000:8000 \
+  --env-file .env \
+  atique123/django-app:latest
+```
+
+### 15.4 — Push to DockerHub
+```bash
+# Push latest tag
+docker push atique123/django-app:latest
+
+# Push versioned tag
+docker push atique123/django-app:v1.0.0
+```
+
+### 15.5 — Tag & Push Both at Once
+```bash
+docker build -t atique123/django-app:latest -t atique123/django-app:v1.0.0 \
+  -f docker/django/Dockerfile .
+
+docker push atique123/django-app:latest
+docker push atique123/django-app:v1.0.0
+```
+
+> 🔗 Your image will be available at: `https://hub.docker.com/r/atique123/django-app`
+
+---
+
+## ☸️ Step 16 — Kubernetes Manifests
+
+### 📁 Kubernetes Folder Structure
+
+```
+k8s/
+├── namespace.yaml
+├── configmap.yaml
+├── secret.yaml
+├── postgres/
+│   ├── postgres-pvc.yaml
+│   ├── postgres-deployment.yaml
+│   └── postgres-service.yaml
+├── django/
+│   ├── django-deployment.yaml
+│   └── django-service.yaml
+├── nginx/
+│   ├── nginx-configmap.yaml
+│   ├── nginx-deployment.yaml
+│   └── nginx-service.yaml
+└── ingress.yaml
+```
+
+---
+
+### 16.1 — Namespace
+
+#### `k8s/namespace.yaml`
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: django-app
+```
+
+---
+
+### 16.2 — ConfigMap (Non-sensitive env vars)
+
+#### `k8s/configmap.yaml`
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: django-config
+  namespace: django-app
+data:
+  DEBUG: "False"
+  ALLOWED_HOSTS: "yourdomain.com,www.yourdomain.com"
+  DB_HOST: "postgres-service"
+  DB_PORT: "5432"
+  POSTGRES_DB: "mydb"
+```
+
+---
+
+### 16.3 — Secret (Sensitive env vars)
+
+#### `k8s/secret.yaml`
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: django-secret
+  namespace: django-app
+type: Opaque
+stringData:
+  SECRET_KEY: "your-very-secret-django-key-here"
+  POSTGRES_USER: "myuser"
+  POSTGRES_PASSWORD: "mypassword"
+```
+
+> ⚠️ Never commit real secrets to Git. Use tools like **Sealed Secrets** or **Vault** in production.
+
+---
+
+### 16.4 — PostgreSQL
+
+#### `k8s/postgres/postgres-pvc.yaml`
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: django-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+```
+
+#### `k8s/postgres/postgres-deployment.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: django-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: django-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: django-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: django-secret
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-storage
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+```
+
+#### `k8s/postgres/postgres-service.yaml`
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: django-app
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+```
+
+---
+
+### 16.5 — Django App
+
+#### `k8s/django/django-deployment.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-web
+  namespace: django-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: django-web
+  template:
+    metadata:
+      labels:
+        app: django-web
+    spec:
+      containers:
+        - name: django-web
+          image: atique123/django-app:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: django-config
+            - secretRef:
+                name: django-secret
+          volumeMounts:
+            - name: static-files
+              mountPath: /app/static
+            - name: media-files
+              mountPath: /app/media
+          readinessProbe:
+            httpGet:
+              path: /admin/
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /admin/
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: static-files
+          emptyDir: {}
+        - name: media-files
+          emptyDir: {}
+```
+
+#### `k8s/django/django-service.yaml`
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-service
+  namespace: django-app
+spec:
+  selector:
+    app: django-web
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
+```
+
+---
+
+### 16.6 — Nginx
+
+#### `k8s/nginx/nginx-configmap.yaml`
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: django-app
+data:
+  default.conf: |
+    upstream django {
+        server django-service:8000;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        location / {
+            proxy_pass         http://django;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_read_timeout 90;
+        }
+
+        location /static/ {
+            alias /app/static/;
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+
+        location /media/ {
+            alias /app/media/;
+            expires 7d;
+        }
+    }
+```
+
+#### `k8s/nginx/nginx-deployment.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: django-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+```
+
+#### `k8s/nginx/nginx-service.yaml`
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  namespace: django-app
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
+  type: LoadBalancer
+```
+
+---
+
+### 16.7 — Ingress (Optional — for domain routing)
+
+#### `k8s/ingress.yaml`
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: django-ingress
+  namespace: django-app
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx-service
+                port:
+                  number: 80
+```
+
+---
+
+### 16.8 — Apply All Manifests
+
+```bash
+# Create namespace first
+kubectl apply -f k8s/namespace.yaml
+
+# Apply configs and secrets
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/secret.yaml
+
+# Deploy PostgreSQL
+kubectl apply -f k8s/postgres/
+
+# Deploy Django app
+kubectl apply -f k8s/django/
+
+# Deploy Nginx
+kubectl apply -f k8s/nginx/
+
+# Apply Ingress (optional)
+kubectl apply -f k8s/ingress.yaml
+```
+
+### 16.9 — Verify Everything is Running
+
+```bash
+# Check all resources in the namespace
+kubectl get all -n django-app
+
+# Check pods status
+kubectl get pods -n django-app
+
+# View logs of Django pod
+kubectl logs -f deployment/django-web -n django-app
+
+# Run Django management commands inside pod
+kubectl exec -it deployment/django-web -n django-app -- python manage.py migrate
+kubectl exec -it deployment/django-web -n django-app -- python manage.py createsuperuser
+
+# Delete all resources
+kubectl delete namespace django-app
+```
+
+---
+
+### ☸️ Kubernetes Architecture
+
+```
+Internet
+    │
+    ▼
+[LoadBalancer / Ingress]
+    │
+    ▼
+[Nginx Pod :80]  ◄──── nginx-configmap (routing rules)
+    │
+    ▼
+[Django Pod :8000]  ◄──── atique123/django-app:latest
+    │
+    ▼
+[PostgreSQL Pod :5432]  ◄──── PersistentVolumeClaim (5Gi)
+```
+
+---
+
 ## 📚 Tech Stack
 
 | Component | Technology |
@@ -833,5 +1292,7 @@ docker system prune -f
 | Reverse Proxy | Nginx |
 | Database | PostgreSQL 15 |
 | Containerization | Docker + Docker Compose |
+| Container Registry | DockerHub (`atique123`) |
+| Orchestration | Kubernetes |
 | Static Files | WhiteNoise |
 | Environment | python-decouple |
